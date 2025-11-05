@@ -1,0 +1,22 @@
+{
+  "name": "extract-all",
+  "version": "1.0.0",
+  "description": "递归解压脚本 - 自动解压 source 文件夹中的所有压缩文件",
+  "main": "extract_all.js",
+  "scripts": {
+    "start": "node extract_all.js",
+    "extract": "node extract_all.js"
+  },
+  "keywords": [
+    "extract",
+    "decompress",
+    "7z",
+    "zip",
+    "recursive"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=12.0.0"
+  }
+}
