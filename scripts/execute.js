@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * 递归解压脚本 (Node.js 版本)
- * 支持递归解压所有压缩文件，并显示进度
+ * 自动递归解压脚本
+ * 自动递归解压 source 文件夹中的压缩包，解压后将内容放到 upload 中
  */
 
 const fs = require("fs");
@@ -30,39 +30,6 @@ const COMPRESSED_EXTENSIONS = [
   ".tar.xz",
 ];
 
-// 支持的图片文件扩展名
-const IMAGE_EXTENSIONS = [
-  ".jpg",
-  ".jpeg",
-  ".png",
-  ".gif",
-  ".bmp",
-  ".webp",
-  ".svg",
-  ".ico",
-  ".tiff",
-  ".tif",
-  ".heic",
-  ".heif",
-];
-
-// 支持的视频文件扩展名
-const VIDEO_EXTENSIONS = [
-  ".mp4",
-  ".avi",
-  ".mov",
-  ".mkv",
-  ".wmv",
-  ".flv",
-  ".webm",
-  ".m4v",
-  ".mpg",
-  ".mpeg",
-  ".3gp",
-  ".ts",
-  ".mts",
-];
-
 /**
  * 检查文件是否为压缩文件（包括分卷压缩）
  */
@@ -86,9 +53,69 @@ function isCompressedFile(filePath) {
       const baseName = name.substring(0, name.length - 4); // 移除 .001
       return COMPRESSED_EXTENSIONS.some((ext) => baseName.endsWith(ext));
     }
+    // 对于 .002, .003 等分卷文件，也标记为压缩文件（但不会单独处理）
+    else if (partNum > 1) {
+      const baseName = name.substring(0, name.length - 4);
+      return COMPRESSED_EXTENSIONS.some((ext) => baseName.endsWith(ext));
+    }
   }
 
   return false;
+}
+
+/**
+ * 查找分卷文件的所有部分并移动到同一目录
+ */
+async function ensureSplitFilesTogether(filePath, targetDir) {
+  const name = path.basename(filePath).toLowerCase();
+  const splitExtMatch = name.match(/\.(\d{3})$/);
+
+  if (!splitExtMatch) {
+    return; // 不是分卷文件
+  }
+
+  const partNum = parseInt(splitExtMatch[1], 10);
+  if (partNum !== 1) {
+    return; // 只处理 .001 文件
+  }
+
+  const baseName = name.substring(0, name.length - 4); // 移除 .001
+  const dir = path.dirname(filePath);
+  const targetPath = path.join(targetDir, path.basename(filePath));
+
+  // 查找所有分卷文件（.002, .003, ...）
+  let partNum2 = 2;
+  while (true) {
+    const partFileName = `${baseName}.${String(partNum2).padStart(3, "0")}`;
+    const partFilePath = path.join(dir, partFileName);
+
+    // 也在 upload 目录中查找（可能已经被移动了）
+    const partFilePathInUpload = path.join(
+      path.dirname(targetDir),
+      "upload",
+      partFileName
+    );
+
+    let foundPath = null;
+    if (fs.existsSync(partFilePath)) {
+      foundPath = partFilePath;
+    } else if (fs.existsSync(partFilePathInUpload)) {
+      foundPath = partFilePathInUpload;
+    }
+
+    if (!foundPath) {
+      break; // 没有更多分卷文件
+    }
+
+    // 将分卷文件移动到目标目录
+    const targetPartPath = path.join(targetDir, partFileName);
+    if (!fs.existsSync(targetPartPath)) {
+      fs.renameSync(foundPath, targetPartPath);
+      console.log(`  → 移动分卷文件: ${partFileName}`);
+    }
+
+    partNum2++;
+  }
 }
 
 /**
@@ -251,78 +278,19 @@ async function extractFile(filePath, outputDir, password = null) {
 }
 
 /**
- * 检查文件是否为图片或视频
+ * 检查文件是否为需要处理的分卷文件（只处理 .001）
  */
-function isMediaFile(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  return IMAGE_EXTENSIONS.includes(ext) || VIDEO_EXTENSIONS.includes(ext);
-}
+function shouldProcessSplitFile(filePath) {
+  const name = path.basename(filePath).toLowerCase();
+  const splitExtMatch = name.match(/\.(\d{3})$/);
 
-/**
- * 检查文件夹是否只包含图片或视频文件（递归检查子文件夹）
- */
-async function containsOnlyMediaFiles(dirPath) {
-  try {
-    const entries = await readdir(dirPath);
-
-    for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry);
-      const stats = await stat(fullPath);
-
-      if (stats.isDirectory()) {
-        // 递归检查子文件夹
-        const subDirOnlyMedia = await containsOnlyMediaFiles(fullPath);
-        if (!subDirOnlyMedia) {
-          return false;
-        }
-      } else if (stats.isFile()) {
-        // 检查文件是否为媒体文件
-        if (!isMediaFile(fullPath)) {
-          // 如果不是媒体文件，检查是否是压缩文件（需要继续解压）
-          if (!isCompressedFile(fullPath)) {
-            // 既不是媒体文件也不是压缩文件，返回 false
-            return false;
-          }
-          // 如果是压缩文件，也返回 false（需要继续解压）
-          return false;
-        }
-      }
-    }
-
-    return true;
-  } catch (error) {
-    console.error(`警告: 无法检查目录 ${dirPath}: ${error.message}`);
-    return false;
-  }
-}
-
-/**
- * 查找第一层包含媒体文件的文件夹
- * 返回这些文件夹的路径数组
- */
-async function findFirstLevelMediaFolders(dirPath) {
-  const mediaFolders = [];
-
-  try {
-    const entries = await readdir(dirPath);
-
-    for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry);
-      const stats = await stat(fullPath);
-
-      if (stats.isDirectory()) {
-        // 检查这个直接子文件夹是否只包含媒体文件
-        const onlyMedia = await containsOnlyMediaFiles(fullPath);
-        if (onlyMedia) {
-          mediaFolders.push(fullPath);
-        }
-      }
-    }
-  } catch (error) {
-    console.error(`警告: 无法扫描目录 ${dirPath}: ${error.message}`);
+  if (splitExtMatch) {
+    const partNum = parseInt(splitExtMatch[1], 10);
+    // 只处理 .001 文件（第一个分卷）
+    return partNum === 1;
   }
 
-  return mediaFolders;
+  return true; // 非分卷文件或标准压缩文件
 }
 
 /**
@@ -342,7 +310,10 @@ async function findCompressedFiles(directory) {
         if (stats.isDirectory()) {
           await scanDir(fullPath);
         } else if (stats.isFile() && isCompressedFile(fullPath)) {
-          compressedFiles.push(fullPath);
+          // 对于分卷文件，只处理 .001 文件
+          if (shouldProcessSplitFile(fullPath)) {
+            compressedFiles.push(fullPath);
+          }
         }
       }
     } catch (error) {
@@ -361,6 +332,43 @@ async function findCompressedFiles(directory) {
 function formatFileSize(bytes) {
   const mb = bytes / (1024 * 1024);
   return mb.toFixed(2);
+}
+
+/**
+ * 递归移动目录内容到目标目录
+ */
+async function moveContentsToUpload(sourceDir, targetDir) {
+  try {
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+
+    const entries = await readdir(sourceDir);
+
+    for (const entry of entries) {
+      const sourcePath = path.join(sourceDir, entry);
+      const targetPath = path.join(targetDir, entry);
+
+      // 如果目标已存在，添加序号
+      let finalTargetPath = targetPath;
+      let counter = 1;
+      while (fs.existsSync(finalTargetPath)) {
+        const ext = path.extname(entry);
+        const nameWithoutExt = path.basename(entry, ext);
+        finalTargetPath = path.join(
+          targetDir,
+          `${nameWithoutExt}_${counter}${ext}`
+        );
+        counter++;
+      }
+
+      // 移动文件或文件夹
+      fs.renameSync(sourcePath, finalTargetPath);
+      console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
+    }
+  } catch (error) {
+    console.error(`警告: 移动文件失败: ${error.message}`);
+  }
 }
 
 /**
@@ -418,68 +426,149 @@ async function recursiveExtract(sourceDir, uploadDir) {
       processed.add(filePath);
       successCount++;
 
-      // 查找第一层包含媒体文件的文件夹
-      const mediaFolders = await findFirstLevelMediaFolders(tempOutputDir);
-
-      // 将找到的媒体文件夹直接移动到 upload 目录
-      for (const mediaFolder of mediaFolders) {
-        const folderName = path.basename(mediaFolder);
-        const finalOutputDir = path.join(uploadDir, folderName);
-
-        // 检查目标文件夹是否已存在，如果存在则添加序号
-        let targetDir = finalOutputDir;
-        let counter = 1;
-        while (fs.existsSync(targetDir)) {
-          targetDir = path.join(uploadDir, `${folderName}_${counter}`);
-          counter++;
-        }
-
-        // 移动文件夹到 upload
-        fs.renameSync(mediaFolder, targetDir);
-        console.log(`  → 移动到 upload: ${targetDir}`);
-      }
-
-      // 检查是否还有压缩文件需要处理
+      // 先检查是否还有压缩文件需要处理（递归解压）
       const newCompressed = await findCompressedFiles(tempOutputDir);
       if (newCompressed.length > 0) {
-        console.log(`  → 发现 ${newCompressed.length} 个压缩文件，继续处理...`);
+        console.log(
+          `  → 发现 ${newCompressed.length} 个压缩文件，移动到 source 目录继续处理...`
+        );
         for (const newFile of newCompressed) {
           if (!processed.has(newFile)) {
-            compressedFiles.push(newFile);
-            totalFiles++;
-            console.log(`  → 发现新压缩文件: ${path.basename(newFile)}`);
-          }
-        }
-      } else if (mediaFolders.length === 0) {
-        // 如果没有找到第一层媒体文件夹，且没有压缩文件，检查是否整个文件夹只包含媒体文件（直接文件，不是子文件夹）
-        const entries = await readdir(tempOutputDir);
-        let hasSubDirs = false;
+            // 将新发现的压缩文件移动到 source 目录，以便后续处理
+            const fileName = path.basename(newFile);
+            const targetPath = path.join(sourceDir, fileName);
 
-        for (const entry of entries) {
-          const fullPath = path.join(tempOutputDir, entry);
-          const stats = await stat(fullPath);
-          if (stats.isDirectory()) {
-            hasSubDirs = true;
-            break;
-          }
-        }
-
-        // 如果没有子文件夹，且只包含媒体文件，才移动整个文件夹
-        if (!hasSubDirs) {
-          const onlyMedia = await containsOnlyMediaFiles(tempOutputDir);
-          if (onlyMedia) {
-            // 整个文件夹只包含媒体文件，直接移动到 upload
-            const folderName = path.basename(tempOutputDir);
-            let targetDir = path.join(uploadDir, folderName);
+            // 如果目标文件已存在，添加序号
+            let finalTargetPath = targetPath;
             let counter = 1;
-            while (fs.existsSync(targetDir)) {
-              targetDir = path.join(uploadDir, `${folderName}_${counter}`);
+            while (fs.existsSync(finalTargetPath)) {
+              const ext = path.extname(fileName);
+              const nameWithoutExt = path.basename(fileName, ext);
+              finalTargetPath = path.join(
+                sourceDir,
+                `${nameWithoutExt}_${counter}${ext}`
+              );
               counter++;
             }
-            fs.renameSync(tempOutputDir, targetDir);
-            console.log(`  → 移动到 upload: ${targetDir}`);
+
+            fs.renameSync(newFile, finalTargetPath);
+
+            // 如果是分卷文件，确保所有分卷都在同一目录（包括临时目录中的分卷）
+            const name = path.basename(finalTargetPath).toLowerCase();
+            const splitExtMatch = name.match(/\.(\d{3})$/);
+            if (splitExtMatch && parseInt(splitExtMatch[1], 10) === 1) {
+              // 查找临时目录中的所有分卷文件
+              const baseName = name.substring(0, name.length - 4);
+              let partNum2 = 2;
+              while (true) {
+                const partFileName = `${baseName}.${String(partNum2).padStart(
+                  3,
+                  "0"
+                )}`;
+                const partFilePath = path.join(tempOutputDir, partFileName);
+
+                if (fs.existsSync(partFilePath)) {
+                  const targetPartPath = path.join(sourceDir, partFileName);
+                  if (!fs.existsSync(targetPartPath)) {
+                    fs.renameSync(partFilePath, targetPartPath);
+                    console.log(`  → 移动分卷文件: ${partFileName}`);
+                  }
+                } else {
+                  break; // 没有更多分卷文件
+                }
+                partNum2++;
+              }
+            }
+
+            compressedFiles.push(finalTargetPath);
+            totalFiles++;
+            console.log(
+              `  → 发现新压缩文件: ${path.basename(finalTargetPath)}`
+            );
           }
         }
+      }
+
+      // 检查解压后的内容，将非压缩文件移动到 upload 目录
+      const entries = await readdir(tempOutputDir);
+
+      // 过滤出非压缩文件
+      const nonCompressedEntries = [];
+      for (const entry of entries) {
+        const fullPath = path.join(tempOutputDir, entry);
+        const stats = await stat(fullPath);
+
+        if (stats.isFile() && isCompressedFile(fullPath)) {
+          // 跳过压缩文件（它们已经在队列中或已处理）
+          continue;
+        }
+        nonCompressedEntries.push(entry);
+      }
+
+      // 如果有非压缩文件，移动到 upload
+      if (nonCompressedEntries.length > 0) {
+        // 如果只有一个非压缩文件/文件夹，直接移动
+        if (nonCompressedEntries.length === 1) {
+          const singleEntry = path.join(tempOutputDir, nonCompressedEntries[0]);
+          const singleEntryStats = await stat(singleEntry);
+
+          if (singleEntryStats.isDirectory()) {
+            // 移动文件夹内容到 upload
+            await moveContentsToUpload(singleEntry, uploadDir);
+          } else {
+            // 移动单个文件到 upload
+            const targetPath = path.join(uploadDir, nonCompressedEntries[0]);
+            let finalTargetPath = targetPath;
+            let counter = 1;
+            while (fs.existsSync(finalTargetPath)) {
+              const ext = path.extname(nonCompressedEntries[0]);
+              const nameWithoutExt = path.basename(
+                nonCompressedEntries[0],
+                ext
+              );
+              finalTargetPath = path.join(
+                uploadDir,
+                `${nameWithoutExt}_${counter}${ext}`
+              );
+              counter++;
+            }
+            fs.renameSync(singleEntry, finalTargetPath);
+            console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
+          }
+        } else {
+          // 多个非压缩文件/文件夹，直接移动所有内容到 upload
+          for (const entry of nonCompressedEntries) {
+            const sourcePath = path.join(tempOutputDir, entry);
+            const targetPath = path.join(uploadDir, entry);
+
+            let finalTargetPath = targetPath;
+            let counter = 1;
+            while (fs.existsSync(finalTargetPath)) {
+              const stats = await stat(sourcePath);
+              if (stats.isFile()) {
+                const ext = path.extname(entry);
+                const nameWithoutExt = path.basename(entry, ext);
+                finalTargetPath = path.join(
+                  uploadDir,
+                  `${nameWithoutExt}_${counter}${ext}`
+                );
+              } else {
+                finalTargetPath = path.join(uploadDir, `${entry}_${counter}`);
+              }
+              counter++;
+            }
+
+            fs.renameSync(sourcePath, finalTargetPath);
+            console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
+          }
+        }
+      }
+
+      // 清理临时解压目录
+      try {
+        fs.rmSync(tempOutputDir, { recursive: true, force: true });
+      } catch (error) {
+        console.error(`警告: 清理临时目录失败: ${error.message}`);
       }
     } catch (error) {
       console.error(`  ✗ 解压失败: ${fileName}`);
@@ -538,13 +627,8 @@ async function main() {
     process.exit(1);
   }
 
-  // upload 目录（使用当天日期命名）
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  const dateStr = `${year}${month}${day}`;
-  const uploadDir = path.join(projectRoot, dateStr);
+  // upload 目录
+  const uploadDir = path.join(projectRoot, "upload");
 
   // 确保 upload 目录存在
   if (!fs.existsSync(uploadDir)) {
