@@ -784,8 +784,13 @@ async function main() {
     process.exit(1);
   }
 
-  // upload 目录
-  const uploadDir = path.join(projectRoot, "upload");
+  // upload 目录（使用当前日期命名：YYYYMMDD）
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const dateStr = `${year}${month}${day}`;
+  const uploadDir = path.join(projectRoot, dateStr);
 
   // 确保 upload 目录存在
   if (!fs.existsSync(uploadDir)) {
@@ -794,7 +799,7 @@ async function main() {
   }
 
   console.log(`源目录: ${sourceDir}`);
-  console.log(`输出目录: ${uploadDir}`);
+  console.log(`输出目录: ${uploadDir} (${dateStr})`);
   console.log(`解压密码: ${PASSWORD}`);
 
   // 开始递归解压
