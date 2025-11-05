@@ -30,6 +30,39 @@ const COMPRESSED_EXTENSIONS = [
   ".tar.xz",
 ];
 
+// 支持的图片文件扩展名
+const IMAGE_EXTENSIONS = [
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".gif",
+  ".bmp",
+  ".webp",
+  ".svg",
+  ".ico",
+  ".tiff",
+  ".tif",
+  ".heic",
+  ".heif",
+];
+
+// 支持的视频文件扩展名
+const VIDEO_EXTENSIONS = [
+  ".mp4",
+  ".avi",
+  ".mov",
+  ".mkv",
+  ".wmv",
+  ".flv",
+  ".webm",
+  ".m4v",
+  ".mpg",
+  ".mpeg",
+  ".3gp",
+  ".ts",
+  ".mts",
+];
+
 /**
  * 检查文件是否为压缩文件（包括分卷压缩）
  */
@@ -327,6 +360,74 @@ async function findCompressedFiles(directory) {
 }
 
 /**
+ * 检查文件是否为图片或视频
+ */
+function isMediaFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  return IMAGE_EXTENSIONS.includes(ext) || VIDEO_EXTENSIONS.includes(ext);
+}
+
+/**
+ * 检查文件夹是否包含图片或视频文件（递归检查）
+ */
+async function containsMediaFiles(dirPath) {
+  try {
+    const entries = await readdir(dirPath);
+
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry);
+      const stats = await stat(fullPath);
+
+      if (stats.isDirectory()) {
+        // 递归检查子文件夹
+        const subDirHasMedia = await containsMediaFiles(fullPath);
+        if (subDirHasMedia) {
+          return true;
+        }
+      } else if (stats.isFile()) {
+        // 检查文件是否为媒体文件
+        if (isMediaFile(fullPath)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  } catch (error) {
+    console.error(`警告: 无法检查目录 ${dirPath}: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * 查找第一层包含媒体文件的文件夹
+ */
+async function findFirstLevelMediaFolders(dirPath) {
+  const mediaFolders = [];
+
+  try {
+    const entries = await readdir(dirPath);
+
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry);
+      const stats = await stat(fullPath);
+
+      if (stats.isDirectory()) {
+        // 检查这个直接子文件夹是否包含媒体文件
+        const hasMedia = await containsMediaFiles(fullPath);
+        if (hasMedia) {
+          mediaFolders.push(fullPath);
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`警告: 无法扫描目录 ${dirPath}: ${error.message}`);
+  }
+
+  return mediaFolders;
+}
+
+/**
  * 格式化文件大小
  */
 function formatFileSize(bytes) {
@@ -489,78 +590,72 @@ async function recursiveExtract(sourceDir, uploadDir) {
         }
       }
 
-      // 检查解压后的内容，将非压缩文件移动到 upload 目录
+      // 检查解压后的内容，将包含媒体文件的文件夹移动到 upload 目录
       const entries = await readdir(tempOutputDir);
 
-      // 过滤出非压缩文件
+      // 先查找第一层包含媒体文件的文件夹
+      const mediaFolders = await findFirstLevelMediaFolders(tempOutputDir);
+
+      // 将包含媒体文件的文件夹整体移动到 upload
+      const processedMediaFolders = new Set();
+      for (const mediaFolder of mediaFolders) {
+        const folderName = path.basename(mediaFolder);
+        let targetDir = path.join(uploadDir, folderName);
+
+        // 检查目标文件夹是否已存在，如果存在则添加序号
+        let counter = 1;
+        while (fs.existsSync(targetDir)) {
+          targetDir = path.join(uploadDir, `${folderName}_${counter}`);
+          counter++;
+        }
+
+        // 移动文件夹到 upload
+        fs.renameSync(mediaFolder, targetDir);
+        processedMediaFolders.add(path.basename(mediaFolder));
+        console.log(`  → 移动媒体文件夹到 upload: ${path.basename(targetDir)}`);
+      }
+
+      // 处理剩余的非压缩文件和文件夹
       const nonCompressedEntries = [];
       for (const entry of entries) {
         const fullPath = path.join(tempOutputDir, entry);
         const stats = await stat(fullPath);
 
+        // 跳过已处理的媒体文件夹和压缩文件
+        if (processedMediaFolders.has(entry)) {
+          continue;
+        }
         if (stats.isFile() && isCompressedFile(fullPath)) {
-          // 跳过压缩文件（它们已经在队列中或已处理）
           continue;
         }
         nonCompressedEntries.push(entry);
       }
 
-      // 如果有非压缩文件，移动到 upload
+      // 如果有剩余的非压缩文件，移动到 upload
       if (nonCompressedEntries.length > 0) {
-        // 如果只有一个非压缩文件/文件夹，直接移动
-        if (nonCompressedEntries.length === 1) {
-          const singleEntry = path.join(tempOutputDir, nonCompressedEntries[0]);
-          const singleEntryStats = await stat(singleEntry);
+        for (const entry of nonCompressedEntries) {
+          const sourcePath = path.join(tempOutputDir, entry);
+          const targetPath = path.join(uploadDir, entry);
 
-          if (singleEntryStats.isDirectory()) {
-            // 移动文件夹内容到 upload
-            await moveContentsToUpload(singleEntry, uploadDir);
-          } else {
-            // 移动单个文件到 upload
-            const targetPath = path.join(uploadDir, nonCompressedEntries[0]);
-            let finalTargetPath = targetPath;
-            let counter = 1;
-            while (fs.existsSync(finalTargetPath)) {
-              const ext = path.extname(nonCompressedEntries[0]);
-              const nameWithoutExt = path.basename(
-                nonCompressedEntries[0],
-                ext
-              );
+          let finalTargetPath = targetPath;
+          let counter = 1;
+          while (fs.existsSync(finalTargetPath)) {
+            const stats = await stat(sourcePath);
+            if (stats.isFile()) {
+              const ext = path.extname(entry);
+              const nameWithoutExt = path.basename(entry, ext);
               finalTargetPath = path.join(
                 uploadDir,
                 `${nameWithoutExt}_${counter}${ext}`
               );
-              counter++;
+            } else {
+              finalTargetPath = path.join(uploadDir, `${entry}_${counter}`);
             }
-            fs.renameSync(singleEntry, finalTargetPath);
-            console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
+            counter++;
           }
-        } else {
-          // 多个非压缩文件/文件夹，直接移动所有内容到 upload
-          for (const entry of nonCompressedEntries) {
-            const sourcePath = path.join(tempOutputDir, entry);
-            const targetPath = path.join(uploadDir, entry);
 
-            let finalTargetPath = targetPath;
-            let counter = 1;
-            while (fs.existsSync(finalTargetPath)) {
-              const stats = await stat(sourcePath);
-              if (stats.isFile()) {
-                const ext = path.extname(entry);
-                const nameWithoutExt = path.basename(entry, ext);
-                finalTargetPath = path.join(
-                  uploadDir,
-                  `${nameWithoutExt}_${counter}${ext}`
-                );
-              } else {
-                finalTargetPath = path.join(uploadDir, `${entry}_${counter}`);
-              }
-              counter++;
-            }
-
-            fs.renameSync(sourcePath, finalTargetPath);
-            console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
-          }
+          fs.renameSync(sourcePath, finalTargetPath);
+          console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
         }
       }
 
