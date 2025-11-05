@@ -76,7 +76,7 @@ function isCompressedFile(filePath) {
   }
 
   // 检查分卷压缩文件（.001, .002, .003 等）
-  // 只处理第一个分卷（.001），7z 会自动合并其他分卷
+  // 注意：只处理 .001 文件，7z 在解压 .001 时会自动找到并合并其他分卷
   const splitExtMatch = name.match(/\.(\d{3})$/);
   if (splitExtMatch) {
     const partNum = parseInt(splitExtMatch[1], 10);
@@ -86,7 +86,8 @@ function isCompressedFile(filePath) {
       const baseName = name.substring(0, name.length - 4); // 移除 .001
       return COMPRESSED_EXTENSIONS.some((ext) => baseName.endsWith(ext));
     }
-    // 对于 .002, .003 等分卷文件，也标记为压缩文件（但不会单独处理）
+    // 对于 .002, .003 等分卷文件，也标记为压缩文件（用于在移动文件时跳过）
+    // 这些文件不会被单独处理，只会在解压对应的 .001 时被 7z 自动使用
     else if (partNum > 1) {
       const baseName = name.substring(0, name.length - 4);
       return COMPRESSED_EXTENSIONS.some((ext) => baseName.endsWith(ext));
@@ -319,11 +320,27 @@ function shouldProcessSplitFile(filePath) {
 
   if (splitExtMatch) {
     const partNum = parseInt(splitExtMatch[1], 10);
-    // 只处理 .001 文件（第一个分卷）
+    // 只处理 .001 文件（第一个分卷），7z 会自动处理其他分卷
     return partNum === 1;
   }
 
   return true; // 非分卷文件或标准压缩文件
+}
+
+/**
+ * 检查文件是否为分卷文件（.002, .003 等，非 .001）
+ */
+function isSplitFilePart(filePath) {
+  const name = path.basename(filePath).toLowerCase();
+  const splitExtMatch = name.match(/\.(\d{3})$/);
+
+  if (splitExtMatch) {
+    const partNum = parseInt(splitExtMatch[1], 10);
+    // 返回是否为 .002, .003 等分卷文件（非 .001）
+    return partNum > 1;
+  }
+
+  return false;
 }
 
 /**
@@ -344,6 +361,7 @@ async function findCompressedFiles(directory) {
           await scanDir(fullPath);
         } else if (stats.isFile() && isCompressedFile(fullPath)) {
           // 对于分卷文件，只处理 .001 文件
+          // .002, .003 等分卷文件会被跳过，它们在解压 .001 时会被 7z 自动使用
           if (shouldProcessSplitFile(fullPath)) {
             compressedFiles.push(fullPath);
           }
@@ -621,13 +639,17 @@ async function recursiveExtract(sourceDir, uploadDir) {
         const fullPath = path.join(tempOutputDir, entry);
         const stats = await stat(fullPath);
 
-        // 跳过已处理的媒体文件夹和压缩文件
+        // 跳过已处理的媒体文件夹
         if (processedMediaFolders.has(entry)) {
           continue;
         }
+
+        // 跳过压缩文件（包括所有分卷文件 .001, .002, .003 等）
+        // 注意：.001 文件已经在上面被处理或加入队列，所以这里所有分卷都会被跳过
         if (stats.isFile() && isCompressedFile(fullPath)) {
           continue;
         }
+
         nonCompressedEntries.push(entry);
       }
 
