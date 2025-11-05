@@ -709,6 +709,46 @@ async function recursiveExtract(sourceDir, uploadDir) {
 }
 
 /**
+ * 清理 source 目录中的所有内容
+ */
+async function cleanSourceDirectory(sourceDir) {
+  try {
+    console.log("\n" + "=".repeat(60));
+    console.log("开始清理 source 目录...");
+
+    const entries = await readdir(sourceDir);
+
+    if (entries.length === 0) {
+      console.log("source 目录已经是空的，无需清理");
+      return;
+    }
+
+    let deletedCount = 0;
+    for (const entry of entries) {
+      const fullPath = path.join(sourceDir, entry);
+      try {
+        const stats = await stat(fullPath);
+
+        if (stats.isDirectory()) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+          console.log(`  ✓ 删除目录: ${entry}`);
+        } else {
+          fs.unlinkSync(fullPath);
+          console.log(`  ✓ 删除文件: ${entry}`);
+        }
+        deletedCount++;
+      } catch (error) {
+        console.error(`  ✗ 删除失败: ${entry} - ${error.message}`);
+      }
+    }
+
+    console.log(`\n清理完成！共删除 ${deletedCount} 个项目`);
+  } catch (error) {
+    console.error(`警告: 清理 source 目录失败: ${error.message}`);
+  }
+}
+
+/**
  * 主函数
  */
 async function main() {
@@ -760,6 +800,9 @@ async function main() {
   // 开始递归解压
   try {
     await recursiveExtract(sourceDir, uploadDir);
+
+    // 解压完成后，清理 source 目录中的所有内容
+    await cleanSourceDirectory(sourceDir);
   } catch (error) {
     console.error("发生错误:", error.message);
     process.exit(1);
