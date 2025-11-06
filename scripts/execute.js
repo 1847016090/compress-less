@@ -818,7 +818,13 @@ async function moveContentsToUpload(sourceDir, targetDir) {
  * 递归处理单个压缩包及其所有嵌套的压缩包
  * 处理完整个压缩包及其所有内容后，删除所有相关文件
  */
-async function processSingleArchive(filePath, sourceDir, uploadDir, processed) {
+async function processSingleArchive(
+  filePath,
+  sourceDir,
+  uploadDir,
+  processed,
+  movedFolders = new Set()
+) {
   const fileName = path.basename(filePath);
   const stats = fs.statSync(filePath);
   const fileSize = formatFileSize(stats.size);
@@ -850,24 +856,57 @@ async function processSingleArchive(filePath, sourceDir, uploadDir, processed) {
     // 检查是否还有压缩文件需要处理（递归解压）
     const newCompressed = await findCompressedFiles(tempOutputDir);
 
+    // 记录递归处理前已存在的文件夹，避免重复处理
+    const existingFoldersBeforeNested = new Set();
+    if (fs.existsSync(tempOutputDir)) {
+      const entriesBefore = await readdir(tempOutputDir);
+      for (const entry of entriesBefore) {
+        const fullPath = path.join(tempOutputDir, entry);
+        try {
+          const stats = await stat(fullPath);
+          if (stats.isDirectory()) {
+            existingFoldersBeforeNested.add(entry);
+          }
+        } catch (error) {
+          // 忽略错误
+        }
+      }
+    }
+
     // 递归处理所有嵌套的压缩文件
     for (const newFile of newCompressed) {
       if (!processed.has(newFile)) {
         processed.add(newFile);
-        // 递归处理嵌套的压缩文件
-        await processSingleArchive(newFile, sourceDir, uploadDir, processed);
+        // 递归处理嵌套的压缩文件，传递已移动的文件夹集合
+        await processSingleArchive(
+          newFile,
+          sourceDir,
+          uploadDir,
+          processed,
+          movedFolders
+        );
       }
     }
 
+    // 递归处理完成后，重新读取 entries（因为嵌套压缩包可能已经移动了一些文件夹）
     // 检查解压后的内容，将包含媒体文件的文件夹移动到 upload 目录
-    const entries = await readdir(tempOutputDir);
+    let entries = [];
+    if (fs.existsSync(tempOutputDir)) {
+      entries = await readdir(tempOutputDir);
+    }
 
     // 先查找第一层包含媒体文件的文件夹
+    // 但要排除已经被嵌套压缩包处理过的文件夹（它们应该已经被移动到upload了）
     const mediaFolders = await findFirstLevelMediaFolders(tempOutputDir);
 
     // 将包含媒体文件的文件夹整体移动到 upload
     const processedMediaFolders = new Set();
     for (const mediaFolder of mediaFolders) {
+      // 检查文件夹是否还存在（递归处理时可能已经移动了）
+      if (!fs.existsSync(mediaFolder)) {
+        continue; // 跳过已经被移动的文件夹
+      }
+
       const folderName = path.basename(mediaFolder);
       let targetDir = path.join(uploadDir, folderName);
 
@@ -879,15 +918,46 @@ async function processSingleArchive(filePath, sourceDir, uploadDir, processed) {
       }
 
       // 移动文件夹到 upload
-      fs.renameSync(mediaFolder, targetDir);
-      processedMediaFolders.add(path.basename(mediaFolder));
-      console.log(`  → 移动媒体文件夹到 upload: ${path.basename(targetDir)}`);
+      try {
+        // 再次检查文件夹是否存在（可能在检查过程中被其他操作移动了）
+        if (!fs.existsSync(mediaFolder)) {
+          continue; // 跳过已经被移动的文件夹
+        }
+
+        const targetBaseName = path.basename(targetDir);
+        // 检查这个文件夹名称是否已经被记录为已移动
+        if (movedFolders.has(targetBaseName)) {
+          console.log(`  → 跳过已移动的文件夹: ${folderName}`);
+          continue;
+        }
+
+        fs.renameSync(mediaFolder, targetDir);
+        processedMediaFolders.add(path.basename(mediaFolder));
+        movedFolders.add(targetBaseName); // 记录已移动的文件夹
+        console.log(`  → 移动媒体文件夹到 upload: ${path.basename(targetDir)}`);
+      } catch (error) {
+        // 如果移动失败，可能是文件夹已经被移动了
+        if (error.code === "ENOENT") {
+          // 文件夹不存在，说明已经被移动了
+          continue;
+        } else {
+          console.error(
+            `警告: 移动文件夹失败: ${folderName} - ${error.message}`
+          );
+        }
+      }
     }
 
     // 处理剩余的非压缩文件和文件夹
     const nonCompressedEntries = [];
     for (const entry of entries) {
       const fullPath = path.join(tempOutputDir, entry);
+
+      // 检查文件/文件夹是否还存在（可能已经被嵌套压缩包移动了）
+      if (!fs.existsSync(fullPath)) {
+        continue; // 跳过已经被移动的文件
+      }
+
       const stats = await stat(fullPath);
 
       // 跳过已处理的媒体文件夹
@@ -900,6 +970,11 @@ async function processSingleArchive(filePath, sourceDir, uploadDir, processed) {
         continue;
       }
 
+      // 跳过临时解压目录（_extracted 结尾的目录，这些是嵌套压缩包的临时目录）
+      if (stats.isDirectory() && entry.endsWith("_extracted")) {
+        continue;
+      }
+
       nonCompressedEntries.push(entry);
     }
 
@@ -907,6 +982,12 @@ async function processSingleArchive(filePath, sourceDir, uploadDir, processed) {
     if (nonCompressedEntries.length > 0) {
       for (const entry of nonCompressedEntries) {
         const sourcePath = path.join(tempOutputDir, entry);
+
+        // 再次检查文件是否存在（可能在之前的操作中已经被移动）
+        if (!fs.existsSync(sourcePath)) {
+          continue;
+        }
+
         const targetPath = path.join(uploadDir, entry);
 
         let finalTargetPath = targetPath;
@@ -926,8 +1007,17 @@ async function processSingleArchive(filePath, sourceDir, uploadDir, processed) {
           counter++;
         }
 
-        fs.renameSync(sourcePath, finalTargetPath);
-        console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
+        try {
+          if (fs.existsSync(sourcePath)) {
+            fs.renameSync(sourcePath, finalTargetPath);
+            console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
+          }
+        } catch (error) {
+          // 如果移动失败，可能是文件已经被移动了
+          if (error.code !== "ENOENT") {
+            console.error(`警告: 移动文件失败: ${entry} - ${error.message}`);
+          }
+        }
       }
     }
 
@@ -993,11 +1083,14 @@ async function recursiveExtract(sourceDir, uploadDir) {
     processed.add(filePath);
 
     // 完全处理这个压缩包（包括所有嵌套的压缩包）
+    // 使用一个共享的 movedFolders 集合来跟踪已移动的文件夹，避免重复
+    const movedFolders = new Set();
     const success = await processSingleArchive(
       filePath,
       sourceDir,
       uploadDir,
-      processed
+      processed,
+      movedFolders
     );
 
     if (success) {
