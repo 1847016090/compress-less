@@ -815,7 +815,155 @@ async function moveContentsToUpload(sourceDir, targetDir) {
 }
 
 /**
+ * 递归处理单个压缩包及其所有嵌套的压缩包
+ * 处理完整个压缩包及其所有内容后，删除所有相关文件
+ */
+async function processSingleArchive(filePath, sourceDir, uploadDir, processed) {
+  const fileName = path.basename(filePath);
+  const stats = fs.statSync(filePath);
+  const fileSize = formatFileSize(stats.size);
+
+  console.log(`\n正在处理: ${fileName} (${fileSize} MB)`);
+  console.log(`  路径: ${filePath}`);
+
+  // 计算输出目录：先解压到临时位置（源文件同级目录）
+  const dir = path.dirname(filePath);
+  const baseExt = getBaseExtension(filePath);
+  let fileNameWithoutExt = path.basename(filePath, baseExt);
+  if (fileNameWithoutExt.match(/\.\d{3}$/)) {
+    fileNameWithoutExt = fileNameWithoutExt.replace(/\.\d{3}$/, "");
+  }
+
+  // 临时解压目录（在源文件同级）
+  const tempOutputDir = path.join(dir, `${fileNameWithoutExt}_extracted`);
+
+  try {
+    // 在解压前验证文件是否存在
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`文件不存在: ${fileName}`);
+    }
+
+    // 解压文件
+    await extractFile(filePath, tempOutputDir, PASSWORD);
+    console.log(`  ✓ 解压成功 -> ${tempOutputDir}`);
+
+    // 检查是否还有压缩文件需要处理（递归解压）
+    const newCompressed = await findCompressedFiles(tempOutputDir);
+
+    // 递归处理所有嵌套的压缩文件
+    for (const newFile of newCompressed) {
+      if (!processed.has(newFile)) {
+        processed.add(newFile);
+        // 递归处理嵌套的压缩文件
+        await processSingleArchive(newFile, sourceDir, uploadDir, processed);
+      }
+    }
+
+    // 检查解压后的内容，将包含媒体文件的文件夹移动到 upload 目录
+    const entries = await readdir(tempOutputDir);
+
+    // 先查找第一层包含媒体文件的文件夹
+    const mediaFolders = await findFirstLevelMediaFolders(tempOutputDir);
+
+    // 将包含媒体文件的文件夹整体移动到 upload
+    const processedMediaFolders = new Set();
+    for (const mediaFolder of mediaFolders) {
+      const folderName = path.basename(mediaFolder);
+      let targetDir = path.join(uploadDir, folderName);
+
+      // 检查目标文件夹是否已存在，如果存在则添加序号
+      let counter = 1;
+      while (fs.existsSync(targetDir)) {
+        targetDir = path.join(uploadDir, `${folderName}_${counter}`);
+        counter++;
+      }
+
+      // 移动文件夹到 upload
+      fs.renameSync(mediaFolder, targetDir);
+      processedMediaFolders.add(path.basename(mediaFolder));
+      console.log(`  → 移动媒体文件夹到 upload: ${path.basename(targetDir)}`);
+    }
+
+    // 处理剩余的非压缩文件和文件夹
+    const nonCompressedEntries = [];
+    for (const entry of entries) {
+      const fullPath = path.join(tempOutputDir, entry);
+      const stats = await stat(fullPath);
+
+      // 跳过已处理的媒体文件夹
+      if (processedMediaFolders.has(entry)) {
+        continue;
+      }
+
+      // 跳过压缩文件（它们已经被递归处理了）
+      if (stats.isFile() && isCompressedFile(fullPath)) {
+        continue;
+      }
+
+      nonCompressedEntries.push(entry);
+    }
+
+    // 如果有剩余的非压缩文件，移动到 upload
+    if (nonCompressedEntries.length > 0) {
+      for (const entry of nonCompressedEntries) {
+        const sourcePath = path.join(tempOutputDir, entry);
+        const targetPath = path.join(uploadDir, entry);
+
+        let finalTargetPath = targetPath;
+        let counter = 1;
+        while (fs.existsSync(finalTargetPath)) {
+          const stats = await stat(sourcePath);
+          if (stats.isFile()) {
+            const ext = path.extname(entry);
+            const nameWithoutExt = path.basename(entry, ext);
+            finalTargetPath = path.join(
+              uploadDir,
+              `${nameWithoutExt}_${counter}${ext}`
+            );
+          } else {
+            finalTargetPath = path.join(uploadDir, `${entry}_${counter}`);
+          }
+          counter++;
+        }
+
+        fs.renameSync(sourcePath, finalTargetPath);
+        console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
+      }
+    }
+
+    // 清理临时解压目录（删除所有解压出来的内容）
+    try {
+      if (fs.existsSync(tempOutputDir)) {
+        fs.rmSync(tempOutputDir, { recursive: true, force: true });
+        console.log(`  ✓ 已清理临时目录: ${path.basename(tempOutputDir)}`);
+      }
+    } catch (error) {
+      console.error(`警告: 清理临时目录失败: ${error.message}`);
+    }
+
+    // 删除源文件（压缩包）
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        console.log(`  ✓ 已删除源文件: ${fileName}`);
+      }
+    } catch (error) {
+      console.error(`警告: 删除源文件失败: ${fileName} - ${error.message}`);
+    }
+
+    return true; // 成功
+  } catch (error) {
+    console.error(`  ✗ 处理失败: ${fileName}`);
+    console.error(`    错误: ${error.message}`);
+    console.log(`  → 源文件已保留，可稍后重试`);
+    // 解压失败时不删除源文件和临时目录
+    return false; // 失败
+  }
+}
+
+/**
  * 递归解压所有压缩文件
+ * 按顺序处理每个原始压缩包，完全处理完一个后再处理下一个
  */
 async function recursiveExtract(sourceDir, uploadDir) {
   const processed = new Set();
@@ -834,203 +982,36 @@ async function recursiveExtract(sourceDir, uploadDir) {
   console.log(`\n找到 ${totalFiles} 个压缩文件，开始解压...`);
   console.log("=".repeat(60));
 
-  while (compressedFiles.length > 0) {
-    const filePath = compressedFiles.shift();
-
+  // 按顺序处理每个原始压缩包
+  for (const filePath of compressedFiles) {
     // 跳过已处理的文件
     if (processed.has(filePath)) {
       continue;
     }
 
     current++;
-    const stats = fs.statSync(filePath);
-    const fileSize = formatFileSize(stats.size);
-    const fileName = path.basename(filePath);
+    processed.add(filePath);
 
-    console.log(
-      `\n[${current}/${totalFiles}] 正在解压: ${fileName} (${fileSize} MB)`
+    // 完全处理这个压缩包（包括所有嵌套的压缩包）
+    const success = await processSingleArchive(
+      filePath,
+      sourceDir,
+      uploadDir,
+      processed
     );
-    console.log(`  路径: ${filePath}`);
 
-    // 计算输出目录：先解压到临时位置（源文件同级目录）
-    const dir = path.dirname(filePath);
-    const baseExt = getBaseExtension(filePath);
-    let fileNameWithoutExt = path.basename(filePath, baseExt);
-    if (fileNameWithoutExt.match(/\.\d{3}$/)) {
-      fileNameWithoutExt = fileNameWithoutExt.replace(/\.\d{3}$/, "");
-    }
-
-    // 临时解压目录（在源文件同级）
-    const tempOutputDir = path.join(dir, `${fileNameWithoutExt}_extracted`);
-
-    try {
-      // 在解压前验证文件是否存在
-      if (!fs.existsSync(filePath)) {
-        console.error(`  ✗ 文件不存在: ${fileName}`);
-        processed.add(filePath);
-        failCount++;
-        continue;
-      }
-
-      await extractFile(filePath, tempOutputDir, PASSWORD);
-      console.log(`  ✓ 解压成功 -> ${tempOutputDir}`);
-      processed.add(filePath);
+    if (success) {
       successCount++;
-
-      // 先检查是否还有压缩文件需要处理（递归解压）
-      const newCompressed = await findCompressedFiles(tempOutputDir);
-      if (newCompressed.length > 0) {
-        console.log(
-          `  → 发现 ${newCompressed.length} 个压缩文件，移动到 source 目录继续处理...`
-        );
-        for (const newFile of newCompressed) {
-          if (!processed.has(newFile)) {
-            // 将新发现的压缩文件移动到 source 目录，以便后续处理
-            const fileName = path.basename(newFile);
-            const targetPath = path.join(sourceDir, fileName);
-
-            // 如果目标文件已存在，添加序号
-            let finalTargetPath = targetPath;
-            let counter = 1;
-            while (fs.existsSync(finalTargetPath)) {
-              const ext = path.extname(fileName);
-              const nameWithoutExt = path.basename(fileName, ext);
-              finalTargetPath = path.join(
-                sourceDir,
-                `${nameWithoutExt}_${counter}${ext}`
-              );
-              counter++;
-            }
-
-            fs.renameSync(newFile, finalTargetPath);
-
-            // 如果是分卷文件，确保所有分卷都在同一目录（包括临时目录中的分卷）
-            const name = path.basename(finalTargetPath).toLowerCase();
-            const splitExtMatch = name.match(/\.(\d{3})$/);
-            if (splitExtMatch && parseInt(splitExtMatch[1], 10) === 1) {
-              // 查找临时目录中的所有分卷文件
-              const baseName = name.substring(0, name.length - 4);
-              let partNum2 = 2;
-              while (true) {
-                const partFileName = `${baseName}.${String(partNum2).padStart(
-                  3,
-                  "0"
-                )}`;
-                const partFilePath = path.join(tempOutputDir, partFileName);
-
-                if (fs.existsSync(partFilePath)) {
-                  const targetPartPath = path.join(sourceDir, partFileName);
-                  if (!fs.existsSync(targetPartPath)) {
-                    fs.renameSync(partFilePath, targetPartPath);
-                    console.log(`  → 移动分卷文件: ${partFileName}`);
-                  }
-                } else {
-                  break; // 没有更多分卷文件
-                }
-                partNum2++;
-              }
-            }
-
-            compressedFiles.push(finalTargetPath);
-            totalFiles++;
-            console.log(
-              `  → 发现新压缩文件: ${path.basename(finalTargetPath)}`
-            );
-          }
-        }
-      }
-
-      // 检查解压后的内容，将包含媒体文件的文件夹移动到 upload 目录
-      const entries = await readdir(tempOutputDir);
-
-      // 先查找第一层包含媒体文件的文件夹
-      const mediaFolders = await findFirstLevelMediaFolders(tempOutputDir);
-
-      // 将包含媒体文件的文件夹整体移动到 upload
-      const processedMediaFolders = new Set();
-      for (const mediaFolder of mediaFolders) {
-        const folderName = path.basename(mediaFolder);
-        let targetDir = path.join(uploadDir, folderName);
-
-        // 检查目标文件夹是否已存在，如果存在则添加序号
-        let counter = 1;
-        while (fs.existsSync(targetDir)) {
-          targetDir = path.join(uploadDir, `${folderName}_${counter}`);
-          counter++;
-        }
-
-        // 移动文件夹到 upload
-        fs.renameSync(mediaFolder, targetDir);
-        processedMediaFolders.add(path.basename(mediaFolder));
-        console.log(`  → 移动媒体文件夹到 upload: ${path.basename(targetDir)}`);
-      }
-
-      // 处理剩余的非压缩文件和文件夹
-      const nonCompressedEntries = [];
-      for (const entry of entries) {
-        const fullPath = path.join(tempOutputDir, entry);
-        const stats = await stat(fullPath);
-
-        // 跳过已处理的媒体文件夹
-        if (processedMediaFolders.has(entry)) {
-          continue;
-        }
-
-        // 跳过压缩文件（包括所有分卷文件 .001, .002, .003 等）
-        // 注意：.001 文件已经在上面被处理或加入队列，所以这里所有分卷都会被跳过
-        if (stats.isFile() && isCompressedFile(fullPath)) {
-          continue;
-        }
-
-        nonCompressedEntries.push(entry);
-      }
-
-      // 如果有剩余的非压缩文件，移动到 upload
-      if (nonCompressedEntries.length > 0) {
-        for (const entry of nonCompressedEntries) {
-          const sourcePath = path.join(tempOutputDir, entry);
-          const targetPath = path.join(uploadDir, entry);
-
-          let finalTargetPath = targetPath;
-          let counter = 1;
-          while (fs.existsSync(finalTargetPath)) {
-            const stats = await stat(sourcePath);
-            if (stats.isFile()) {
-              const ext = path.extname(entry);
-              const nameWithoutExt = path.basename(entry, ext);
-              finalTargetPath = path.join(
-                uploadDir,
-                `${nameWithoutExt}_${counter}${ext}`
-              );
-            } else {
-              finalTargetPath = path.join(uploadDir, `${entry}_${counter}`);
-            }
-            counter++;
-          }
-
-          fs.renameSync(sourcePath, finalTargetPath);
-          console.log(`  → 移动到 upload: ${path.basename(finalTargetPath)}`);
-        }
-      }
-
-      // 清理临时解压目录
-      try {
-        fs.rmSync(tempOutputDir, { recursive: true, force: true });
-      } catch (error) {
-        console.error(`警告: 清理临时目录失败: ${error.message}`);
-      }
-    } catch (error) {
-      console.error(`  ✗ 解压失败: ${fileName}`);
-      console.error(`    错误: ${error.message}`);
-      processed.add(filePath); // 标记为已处理，避免重复尝试
+    } else {
       failCount++;
     }
 
     const progress =
       totalFiles > 0 ? Math.floor((current * 100) / totalFiles) : 0;
     console.log(
-      `  进度: ${current}/${totalFiles} (${progress}%) | 成功: ${successCount} | 失败: ${failCount}`
+      `\n进度: ${current}/${totalFiles} (${progress}%) | 成功: ${successCount} | 失败: ${failCount}`
     );
+    console.log("=".repeat(60));
   }
 
   console.log("\n" + "=".repeat(60));
@@ -1041,42 +1022,41 @@ async function recursiveExtract(sourceDir, uploadDir) {
 }
 
 /**
- * 清理 source 目录中的所有内容
+ * 清理 source 目录中的临时解压目录（_extracted 目录）
+ * 只清理临时目录，不删除源文件（失败的文件需要保留以便重试）
  */
-async function cleanSourceDirectory(sourceDir) {
+async function cleanTempDirectories(sourceDir) {
   try {
-    console.log("\n" + "=".repeat(60));
-    console.log("开始清理 source 目录...");
-
     const entries = await readdir(sourceDir);
+    const tempDirs = entries.filter((entry) => entry.endsWith("_extracted"));
 
-    if (entries.length === 0) {
-      console.log("source 目录已经是空的，无需清理");
-      return;
+    if (tempDirs.length === 0) {
+      return; // 没有临时目录需要清理
     }
 
+    console.log("\n" + "=".repeat(60));
+    console.log("清理临时解压目录...");
+
     let deletedCount = 0;
-    for (const entry of entries) {
+    for (const entry of tempDirs) {
       const fullPath = path.join(sourceDir, entry);
       try {
         const stats = await stat(fullPath);
-
         if (stats.isDirectory()) {
           fs.rmSync(fullPath, { recursive: true, force: true });
-          console.log(`  ✓ 删除目录: ${entry}`);
-        } else {
-          fs.unlinkSync(fullPath);
-          console.log(`  ✓ 删除文件: ${entry}`);
+          console.log(`  ✓ 删除临时目录: ${entry}`);
+          deletedCount++;
         }
-        deletedCount++;
       } catch (error) {
-        console.error(`  ✗ 删除失败: ${entry} - ${error.message}`);
+        console.error(`  ✗ 删除临时目录失败: ${entry} - ${error.message}`);
       }
     }
 
-    console.log(`\n清理完成！共删除 ${deletedCount} 个项目`);
+    if (deletedCount > 0) {
+      console.log(`清理完成！共删除 ${deletedCount} 个临时目录`);
+    }
   } catch (error) {
-    console.error(`警告: 清理 source 目录失败: ${error.message}`);
+    console.error(`警告: 清理临时目录失败: ${error.message}`);
   }
 }
 
@@ -1161,8 +1141,9 @@ async function main() {
   try {
     await recursiveExtract(sourceDir, uploadDir);
 
-    // 解压完成后，清理 source 目录中的所有内容
-    await cleanSourceDirectory(sourceDir);
+    // 解压完成后，只清理 source 目录中的临时解压目录（_extracted 目录）
+    // 解压成功的文件已经删除，解压失败的文件保留以便重试
+    await cleanTempDirectories(sourceDir);
   } catch (error) {
     console.error("发生错误:", error.message);
     process.exit(1);
