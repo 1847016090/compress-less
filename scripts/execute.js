@@ -170,6 +170,43 @@ function which(command) {
 /**
  * 使用 7z 命令解压文件
  */
+/**
+ * 检查磁盘空间是否足够
+ */
+function checkDiskSpace(filePath, outputDir) {
+  try {
+    const stats = fs.statSync(filePath);
+    const fileSize = stats.size;
+
+    // 估算需要的空间（解压后可能是压缩前的 2-3 倍，但这里保守估计为 1.5 倍）
+    const estimatedNeeded = fileSize * 1.5;
+
+    // 获取输出目录所在磁盘的可用空间
+    const outputParent = path.dirname(outputDir);
+    const dfOutput = execSync(`df -k "${outputParent}"`, { encoding: "utf8" });
+    const lines = dfOutput.trim().split("\n");
+    if (lines.length > 1) {
+      const parts = lines[1].split(/\s+/);
+      const availableKB = parseInt(parts[3], 10);
+      const availableBytes = availableKB * 1024;
+
+      if (availableBytes < estimatedNeeded) {
+        const neededGB = (estimatedNeeded / (1024 * 1024 * 1024)).toFixed(2);
+        const availableGB = (availableBytes / (1024 * 1024 * 1024)).toFixed(2);
+        return {
+          enough: false,
+          needed: neededGB,
+          available: availableGB,
+        };
+      }
+    }
+    return { enough: true };
+  } catch (error) {
+    // 如果检查失败，继续执行（可能是权限问题）
+    return { enough: true, error: error.message };
+  }
+}
+
 function extract7z(filePath, outputDir, password = null) {
   return new Promise((resolve, reject) => {
     // 验证文件是否存在
@@ -187,6 +224,20 @@ function extract7z(filePath, outputDir, password = null) {
       }
     } catch (error) {
       reject(new Error(`无法读取文件: ${filePath} - ${error.message}`));
+      return;
+    }
+
+    // 检查磁盘空间
+    const spaceCheck = checkDiskSpace(filePath, outputDir);
+    if (!spaceCheck.enough) {
+      reject(
+        new Error(
+          `磁盘空间不足！\n` +
+            `需要空间: ${spaceCheck.needed} GB\n` +
+            `可用空间: ${spaceCheck.available} GB\n` +
+            `请清理磁盘空间后重试`
+        )
+      );
       return;
     }
 
@@ -230,13 +281,51 @@ function extract7z(filePath, outputDir, password = null) {
         } else {
           // 提供更详细的错误信息
           let errorMsg = stderr || stdout;
+          const fileName = path.basename(filePath);
+          const isRarFile = fileName.toLowerCase().endsWith(".rar");
 
           // 检查常见的错误类型并给出建议
           if (
+            errorMsg.includes("No space left on device") ||
+            errorMsg.includes("No space")
+          ) {
+            const spaceCheck = checkDiskSpace(filePath, outputDir);
+            if (!spaceCheck.enough) {
+              errorMsg =
+                `磁盘空间不足！\n` +
+                `需要空间: ${spaceCheck.needed} GB\n` +
+                `可用空间: ${spaceCheck.available} GB\n` +
+                `请清理磁盘空间后重试`;
+            } else {
+              errorMsg = `磁盘空间不足: ${errorMsg}\n` + `请清理磁盘空间后重试`;
+            }
+          } else if (
+            errorMsg.includes("E_FAIL") ||
+            errorMsg.includes("ERROR:")
+          ) {
+            if (isRarFile) {
+              errorMsg =
+                `7z 无法解压此 RAR 文件: ${fileName}\n` +
+                `错误: ${errorMsg}\n` +
+                `建议: 对于大型或特殊格式的 RAR 文件，建议使用 unar 工具 (brew install unar)\n` +
+                `或者: 请检查文件是否完整，是否所有分卷文件都在同一目录`;
+            } else {
+              // 检查是否是磁盘空间问题
+              const stats = fs.statSync(filePath);
+              const fileSizeGB = (stats.size / (1024 * 1024 * 1024)).toFixed(2);
+              errorMsg =
+                `解压失败: ${fileName} (${fileSizeGB} GB)\n` +
+                `错误: ${errorMsg}\n` +
+                `可能原因:\n` +
+                `  1. 磁盘空间不足（大文件需要足够的可用空间）\n` +
+                `  2. 文件损坏或不完整\n` +
+                `  3. 分卷压缩文件缺少其他分卷\n` +
+                `建议: 检查磁盘空间，确保有足够的可用空间（至少 ${fileSizeGB} GB）`;
+            }
+          } else if (
             errorMsg.includes("Can not open the file as") ||
             errorMsg.includes("Open ERROR")
           ) {
-            const fileName = path.basename(filePath);
             errorMsg =
               `文件可能已损坏或不是有效的压缩文件: ${fileName}\n` +
               `原始错误: ${errorMsg}\n` +
@@ -248,6 +337,19 @@ function extract7z(filePath, outputDir, password = null) {
             errorMsg = `密码错误: ${errorMsg}`;
           } else if (errorMsg.includes("No such file or directory")) {
             errorMsg = `文件不存在或已被删除: ${filePath}`;
+          } else if (errorMsg.trim() === "" || errorMsg.includes("ERROR:")) {
+            // 对于空错误或只有 ERROR 的情况，提供更详细的说明
+            if (isRarFile) {
+              errorMsg =
+                `RAR 文件解压失败: ${fileName}\n` +
+                `可能原因:\n` +
+                `  1. 7z 对该 RAR 文件格式支持不完整\n` +
+                `  2. 文件较大，建议使用 unrar 工具 (brew install unrar)\n` +
+                `  3. 文件可能损坏或不完整\n` +
+                `  4. 可能需要所有分卷文件在同一目录`;
+            } else {
+              errorMsg = `解压失败: ${fileName} - 未知错误`;
+            }
           }
 
           reject(new Error(errorMsg));
@@ -305,6 +407,85 @@ function extractZip(filePath, outputDir, password = null) {
 
     child.on("error", (err) => {
       reject(err);
+    });
+  });
+}
+
+/**
+ * 使用 unar 命令解压 RAR 文件（macOS 推荐工具）
+ */
+function extractUnar(filePath, outputDir, password = null) {
+  return new Promise((resolve, reject) => {
+    // 验证文件是否存在
+    if (!fs.existsSync(filePath)) {
+      reject(new Error(`文件不存在: ${filePath}`));
+      return;
+    }
+
+    // 验证文件大小
+    try {
+      const stats = fs.statSync(filePath);
+      if (stats.size === 0) {
+        reject(new Error(`文件为空: ${filePath}`));
+        return;
+      }
+    } catch (error) {
+      reject(new Error(`无法读取文件: ${filePath} - ${error.message}`));
+      return;
+    }
+
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    // unar 命令参数
+    // -o 指定输出目录，-password 密码
+    const args = ["-o", outputDir];
+    if (password) {
+      args.push("-password", password);
+    }
+    args.push(filePath);
+
+    const child = spawn("unar", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(true);
+      } else {
+        // 提供更详细的错误信息
+        let errorMsg = stderr || stdout;
+        if (
+          errorMsg.includes("Wrong password") ||
+          errorMsg.includes("password")
+        ) {
+          errorMsg = `密码错误: ${errorMsg}`;
+        } else if (
+          errorMsg.includes("corrupted") ||
+          errorMsg.includes("damaged")
+        ) {
+          errorMsg = `文件已损坏: ${path.basename(
+            filePath
+          )}\n原始错误: ${errorMsg}`;
+        }
+        reject(new Error(`unar 命令失败: ${errorMsg}`));
+      }
+    });
+
+    child.on("error", (err) => {
+      reject(new Error(`unar 命令执行失败: ${err.message}`));
     });
   });
 }
@@ -411,6 +592,7 @@ async function extractFile(filePath, outputDir, password = null) {
   const ext = getBaseExtension(filePath);
   const has7z = which("7z");
   const hasUnzip = which("unzip");
+  const hasUnar = which("unar");
   const hasUnrar = which("unrar");
 
   try {
@@ -424,15 +606,17 @@ async function extractFile(filePath, outputDir, password = null) {
         throw new Error("未找到可用的解压工具 (需要 7z 或 unzip)");
       }
     }
-    // RAR 文件：优先使用 unrar，否则使用 7z
+    // RAR 文件：优先使用 unar（macOS 推荐），其次 unrar，最后 7z
     else if (ext === ".rar") {
-      if (hasUnrar) {
+      if (hasUnar) {
+        return await extractUnar(filePath, outputDir, password);
+      } else if (hasUnrar) {
         return await extractRar(filePath, outputDir, password);
       } else if (has7z) {
         return await extract7z(filePath, outputDir, password);
       } else {
         throw new Error(
-          `解压 ${ext} 格式需要 unrar 或 7z 工具。请运行: brew install unrar 或 brew install p7zip`
+          `解压 ${ext} 格式需要 unar、unrar 或 7z 工具。请运行: brew install unar 或 brew install unrar 或 brew install p7zip`
         );
       }
     }
@@ -903,6 +1087,8 @@ async function main() {
   // 检查是否有可用的解压工具
   const has7z = which("7z");
   const hasUnzip = which("unzip");
+  const hasUnar = which("unar");
+  const hasUnrar = which("unrar");
 
   if (!has7z && !hasUnzip) {
     console.log("=".repeat(60));
@@ -912,12 +1098,6 @@ async function main() {
     console.log("  2. 安装 unzip: brew install unzip");
     console.log("=".repeat(60));
     process.exit(1);
-  }
-
-  if (has7z) {
-    console.log("使用系统 7z 工具进行解压");
-  } else {
-    console.log("使用系统 unzip 工具进行解压");
   }
 
   // 获取脚本所在目录的父目录（项目根目录）
@@ -930,6 +1110,33 @@ async function main() {
   if (!fs.existsSync(sourceDir)) {
     console.error(`错误: 源目录不存在: ${sourceDir}`);
     process.exit(1);
+  }
+
+  // 检查是否有 RAR 文件
+  const rarFiles = await findCompressedFiles(sourceDir);
+  const hasRarFiles = rarFiles.some((file) =>
+    file.toLowerCase().endsWith(".rar")
+  );
+
+  if (hasRarFiles && !hasUnar && !hasUnrar) {
+    console.log("=".repeat(60));
+    console.log("提示: 检测到 RAR 文件，但未安装 unar 或 unrar 工具");
+    console.log("建议: 对于大型或特殊格式的 RAR 文件，建议安装 unar（推荐）");
+    console.log("安装命令: brew install unar");
+    console.log("当前将使用 7z 工具解压 RAR 文件（可能不完全支持）");
+    console.log("=".repeat(60));
+  }
+
+  if (has7z) {
+    console.log("使用系统 7z 工具进行解压");
+  } else {
+    console.log("使用系统 unzip 工具进行解压");
+  }
+
+  if (hasUnar) {
+    console.log("使用系统 unar 工具进行解压（RAR 文件，推荐）");
+  } else if (hasUnrar) {
+    console.log("使用系统 unrar 工具进行解压（RAR 文件）");
   }
 
   // upload 目录（使用当前日期命名：YYYYMMDD）
