@@ -172,6 +172,24 @@ function which(command) {
  */
 function extract7z(filePath, outputDir, password = null) {
   return new Promise((resolve, reject) => {
+    // 验证文件是否存在
+    if (!fs.existsSync(filePath)) {
+      reject(new Error(`文件不存在: ${filePath}`));
+      return;
+    }
+
+    // 验证文件大小
+    try {
+      const stats = fs.statSync(filePath);
+      if (stats.size === 0) {
+        reject(new Error(`文件为空: ${filePath}`));
+        return;
+      }
+    } catch (error) {
+      reject(new Error(`无法读取文件: ${filePath} - ${error.message}`));
+      return;
+    }
+
     // 确保输出目录存在
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
@@ -201,12 +219,44 @@ function extract7z(filePath, outputDir, password = null) {
       if (code === 0) {
         resolve(true);
       } else {
-        reject(new Error(`7z 命令失败: ${stderr || stdout}`));
+        // 对于 .rar 文件，7z 可能返回非 0 但实际成功（部分成功）
+        // 检查输出中是否有解压成功的迹象
+        const output = (stderr || stdout).toLowerCase();
+        if (
+          output.includes("extracting") ||
+          output.includes("everything is ok")
+        ) {
+          resolve(true);
+        } else {
+          // 提供更详细的错误信息
+          let errorMsg = stderr || stdout;
+
+          // 检查常见的错误类型并给出建议
+          if (
+            errorMsg.includes("Can not open the file as") ||
+            errorMsg.includes("Open ERROR")
+          ) {
+            const fileName = path.basename(filePath);
+            errorMsg =
+              `文件可能已损坏或不是有效的压缩文件: ${fileName}\n` +
+              `原始错误: ${errorMsg}\n` +
+              `建议: 请检查文件是否完整，或是否为分卷压缩文件（需要所有分卷在同一目录）`;
+          } else if (
+            errorMsg.includes("Wrong password") ||
+            errorMsg.includes("password")
+          ) {
+            errorMsg = `密码错误: ${errorMsg}`;
+          } else if (errorMsg.includes("No such file or directory")) {
+            errorMsg = `文件不存在或已被删除: ${filePath}`;
+          }
+
+          reject(new Error(errorMsg));
+        }
       }
     });
 
     child.on("error", (err) => {
-      reject(err);
+      reject(new Error(`7z 命令执行失败: ${err.message}`));
     });
   });
 }
@@ -260,6 +310,83 @@ function extractZip(filePath, outputDir, password = null) {
 }
 
 /**
+ * 使用 unrar 命令解压 RAR 文件
+ */
+function extractRar(filePath, outputDir, password = null) {
+  return new Promise((resolve, reject) => {
+    // 验证文件是否存在
+    if (!fs.existsSync(filePath)) {
+      reject(new Error(`文件不存在: ${filePath}`));
+      return;
+    }
+
+    // 验证文件大小
+    try {
+      const stats = fs.statSync(filePath);
+      if (stats.size === 0) {
+        reject(new Error(`文件为空: ${filePath}`));
+        return;
+      }
+    } catch (error) {
+      reject(new Error(`无法读取文件: ${filePath} - ${error.message}`));
+      return;
+    }
+
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    // unrar 命令参数
+    // x = 解压到完整路径，-y = 自动确认，-p = 密码
+    const args = ["x", "-y"];
+    if (password) {
+      args.push(`-p${password}`);
+    }
+    args.push(filePath, `${outputDir}/`);
+
+    const child = spawn("unrar", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    child.on("close", (code) => {
+      if (code === 0 || code === 1) {
+        // unrar 返回 0 表示成功，1 表示警告但成功
+        resolve(true);
+      } else {
+        // 提供更详细的错误信息
+        let errorMsg = stderr || stdout;
+        if (errorMsg.includes("CRC failed") || errorMsg.includes("corrupted")) {
+          errorMsg = `文件已损坏: ${path.basename(
+            filePath
+          )}\n原始错误: ${errorMsg}`;
+        } else if (
+          errorMsg.includes("Wrong password") ||
+          errorMsg.includes("password")
+        ) {
+          errorMsg = `密码错误: ${errorMsg}`;
+        }
+        reject(new Error(`unrar 命令失败: ${errorMsg}`));
+      }
+    });
+
+    child.on("error", (err) => {
+      reject(new Error(`unrar 命令执行失败: ${err.message}`));
+    });
+  });
+}
+
+/**
  * 获取文件的基础扩展名（处理分卷压缩）
  */
 function getBaseExtension(filePath) {
@@ -284,6 +411,7 @@ async function extractFile(filePath, outputDir, password = null) {
   const ext = getBaseExtension(filePath);
   const has7z = which("7z");
   const hasUnzip = which("unzip");
+  const hasUnrar = which("unrar");
 
   try {
     // ZIP 文件：优先使用 unzip，否则使用 7z
@@ -296,7 +424,19 @@ async function extractFile(filePath, outputDir, password = null) {
         throw new Error("未找到可用的解压工具 (需要 7z 或 unzip)");
       }
     }
-    // 其他格式（.7z, .rar 等，包括分卷）：必须使用 7z
+    // RAR 文件：优先使用 unrar，否则使用 7z
+    else if (ext === ".rar") {
+      if (hasUnrar) {
+        return await extractRar(filePath, outputDir, password);
+      } else if (has7z) {
+        return await extract7z(filePath, outputDir, password);
+      } else {
+        throw new Error(
+          `解压 ${ext} 格式需要 unrar 或 7z 工具。请运行: brew install unrar 或 brew install p7zip`
+        );
+      }
+    }
+    // 其他格式（.7z 等，包括分卷）：使用 7z
     else {
       if (has7z) {
         return await extract7z(filePath, outputDir, password);
@@ -540,6 +680,14 @@ async function recursiveExtract(sourceDir, uploadDir) {
     const tempOutputDir = path.join(dir, `${fileNameWithoutExt}_extracted`);
 
     try {
+      // 在解压前验证文件是否存在
+      if (!fs.existsSync(filePath)) {
+        console.error(`  ✗ 文件不存在: ${fileName}`);
+        processed.add(filePath);
+        failCount++;
+        continue;
+      }
+
       await extractFile(filePath, tempOutputDir, PASSWORD);
       console.log(`  ✓ 解压成功 -> ${tempOutputDir}`);
       processed.add(filePath);
