@@ -912,6 +912,86 @@ async function processSingleArchive(
       entries = await readdir(tempOutputDir);
     }
     console.log("===entries===", entries);
+
+    // 检查第一层是否直接包含图片，如果包含则直接移动整个 tempOutputDir 到目标目录
+    const imageExtensions = [
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".gif",
+      ".bmp",
+      ".webp",
+      ".tiff",
+      ".tif",
+      ".ico",
+      ".heic",
+      // 视频扩展名
+      ".mp4",
+      ".avi",
+      ".mov",
+      ".wmv",
+      ".flv",
+      ".mkv",
+      ".webm",
+      ".mpg",
+      ".mpeg",
+      ".m4v",
+      ".3gp",
+      ".mts",
+      ".ts",
+      ".rmvb",
+      ".rm",
+      ".vob",
+      ".ogg",
+    ];
+    let hasTopLevelImage = false;
+    for (const entry of entries) {
+      const entryPath = path.join(tempOutputDir, entry);
+      try {
+        const stats = await stat(entryPath);
+        if (stats.isFile()) {
+          const ext = path.extname(entry).toLowerCase();
+          if (imageExtensions.includes(ext)) {
+            hasTopLevelImage = true;
+            break;
+          }
+        }
+      } catch (e) {
+        // 忽略无法 stat 的文件
+      }
+    }
+    console.log("hasTopLevelImage", hasTopLevelImage);
+    if (hasTopLevelImage) {
+      // 需要将 tempOutputDir 整体移动到 upload 目录（并避免目标目录重名）
+      const baseName = path.basename(tempOutputDir);
+      let targetDir = path.join(uploadDir, baseName);
+      let counter = 1;
+      while (fs.existsSync(targetDir)) {
+        targetDir = path.join(uploadDir, `${baseName}_${counter}`);
+        counter++;
+      }
+      try {
+        fs.renameSync(tempOutputDir, targetDir);
+        movedFolders && movedFolders.add(path.basename(targetDir));
+        console.log(
+          `  → 发现图片，整体移动文件夹到 upload: ${path.basename(targetDir)}`
+        );
+        // 删除源压缩包
+        try {
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log(`  ✓ 已删除源文件: ${fileName}`);
+          }
+        } catch (error) {
+          console.error(`警告: 删除源文件失败: ${fileName} - ${error.message}`);
+        }
+        return true;
+      } catch (error) {
+        console.error(`移动包含图片的文件夹失败: ${error.message}`);
+        // 不 return，继续原有流程
+      }
+    }
+
     // 先查找第一层包含媒体文件的文件夹
     // 但要排除已经被嵌套压缩包处理过的文件夹（它们应该已经被移动到upload了）
     const mediaFolders = await findFirstLevelMediaFolders(tempOutputDir);
