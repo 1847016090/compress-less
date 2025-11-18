@@ -851,6 +851,17 @@ async function processSingleArchive(
 
     // 解压文件
     await extractFile(filePath, tempOutputDir, PASSWORD);
+
+    // 验证解压结果：检查解压目录是否存在且包含内容
+    if (!fs.existsSync(tempOutputDir)) {
+      throw new Error(`解压失败：解压目录不存在 ${tempOutputDir}`);
+    }
+
+    const extractedEntries = await readdir(tempOutputDir);
+    if (extractedEntries.length === 0) {
+      throw new Error(`解压失败：解压目录为空 ${tempOutputDir}`);
+    }
+
     console.log(`  ✓ 解压成功 -> ${tempOutputDir}`);
 
     // 检查是否还有压缩文件需要处理（递归解压）
@@ -878,13 +889,17 @@ async function processSingleArchive(
       if (!processed.has(newFile)) {
         processed.add(newFile);
         // 递归处理嵌套的压缩文件，传递已移动的文件夹集合
-        await processSingleArchive(
+        const nestedSuccess = await processSingleArchive(
           newFile,
           sourceDir,
           uploadDir,
           processed,
           movedFolders
         );
+        // 如果嵌套压缩文件处理失败，抛出错误以保留源文件
+        if (!nestedSuccess) {
+          throw new Error(`嵌套压缩文件处理失败: ${path.basename(newFile)}`);
+        }
       }
     }
 
@@ -1046,7 +1061,17 @@ async function processSingleArchive(
     console.error(`  ✗ 处理失败: ${fileName}`);
     console.error(`    错误: ${error.message}`);
     console.log(`  → 源文件已保留，可稍后重试`);
-    // 解压失败时不删除源文件和临时目录
+
+    // 解压失败时清理可能存在的临时目录，但保留源文件
+    try {
+      if (fs.existsSync(tempOutputDir)) {
+        fs.rmSync(tempOutputDir, { recursive: true, force: true });
+        console.log(`  → 已清理临时目录: ${path.basename(tempOutputDir)}`);
+      }
+    } catch (cleanupError) {
+      console.error(`警告: 清理临时目录失败: ${cleanupError.message}`);
+    }
+
     return false; // 失败
   }
 }
