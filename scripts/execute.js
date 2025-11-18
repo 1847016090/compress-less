@@ -372,10 +372,11 @@ function extractZip(filePath, outputDir, password = null) {
       fs.mkdirSync(outputDir, { recursive: true });
     }
 
-    const args = ["-o", filePath, "-d", outputDir];
+    const args = ["-o"];
     if (password) {
-      args.push(`-P${password}`);
+      args.push("-P", password);
     }
+    args.push(filePath, "-d", outputDir);
 
     const child = spawn("unzip", args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -596,7 +597,7 @@ async function extractFile(filePath, outputDir, password = null) {
   const hasUnrar = which("unrar");
 
   try {
-    // ZIP 文件：优先使用 unzip，否则使用 7z
+    // ZIP 文件：优先使用 7z（对密码和嵌套文件支持更好），否则使用 unzip
     if (ext === ".zip") {
       if (hasUnzip) {
         return await extractZip(filePath, outputDir, password);
@@ -851,7 +852,6 @@ async function processSingleArchive(
 
     // 解压文件
     await extractFile(filePath, tempOutputDir, PASSWORD);
-
     // 验证解压结果：检查解压目录是否存在且包含内容
     if (!fs.existsSync(tempOutputDir)) {
       throw new Error(`解压失败：解压目录不存在 ${tempOutputDir}`);
@@ -905,15 +905,17 @@ async function processSingleArchive(
 
     // 递归处理完成后，重新读取 entries（因为嵌套压缩包可能已经移动了一些文件夹）
     // 检查解压后的内容，将包含媒体文件的文件夹移动到 upload 目录
+    // return;
+
     let entries = [];
     if (fs.existsSync(tempOutputDir)) {
       entries = await readdir(tempOutputDir);
     }
-
+    console.log("===entries===", entries);
     // 先查找第一层包含媒体文件的文件夹
     // 但要排除已经被嵌套压缩包处理过的文件夹（它们应该已经被移动到upload了）
     const mediaFolders = await findFirstLevelMediaFolders(tempOutputDir);
-
+    console.log("==mediaFolders==", mediaFolders);
     // 将包含媒体文件的文件夹整体移动到 upload
     const processedMediaFolders = new Set();
     for (const mediaFolder of mediaFolders) {
@@ -921,10 +923,10 @@ async function processSingleArchive(
       if (!fs.existsSync(mediaFolder)) {
         continue; // 跳过已经被移动的文件夹
       }
-
       const folderName = path.basename(mediaFolder);
+      console.log("==folderName===", folderName);
       let targetDir = path.join(uploadDir, folderName);
-
+      console.log("==targetDir===", targetDir);
       // 检查目标文件夹是否已存在，如果存在则添加序号
       let counter = 1;
       while (fs.existsSync(targetDir)) {
