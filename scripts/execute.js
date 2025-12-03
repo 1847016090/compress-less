@@ -1162,13 +1162,15 @@ async function processSingleArchive(
  * 递归解压所有压缩文件
  * 按顺序处理每个原始压缩包，完全处理完一个后再处理下一个
  */
-async function recursiveExtract(sourceDir, uploadDir) {
-  const processed = new Set();
+async function recursiveExtract(sourceDir, uploadDir, processed = new Set()) {
   let compressedFiles = await findCompressedFiles(sourceDir);
 
+  // 过滤掉已处理的文件
+  compressedFiles = compressedFiles.filter((file) => !processed.has(file));
+
   if (compressedFiles.length === 0) {
-    console.log("未找到压缩文件");
-    return;
+    console.log("未找到新的压缩文件");
+    return { processedCount: 0, successCount: 0, failCount: 0 };
   }
 
   let totalFiles = compressedFiles.length;
@@ -1219,6 +1221,8 @@ async function recursiveExtract(sourceDir, uploadDir) {
   console.log(`  总计: ${current} 个文件`);
   console.log(`  成功: ${successCount} 个`);
   console.log(`  失败: ${failCount} 个`);
+
+  return { processedCount: current, successCount, failCount };
 }
 
 /**
@@ -1258,6 +1262,90 @@ async function cleanTempDirectories(sourceDir) {
   } catch (error) {
     console.error(`警告: 清理临时目录失败: ${error.message}`);
   }
+}
+
+/**
+ * 监听 source 目录变化并自动解压
+ */
+function watchSourceDirectory(sourceDir, uploadDir, processed) {
+  let debounceTimer = null;
+  let isProcessing = false;
+
+  console.log("\n" + "=".repeat(60));
+  console.log("开始监听 source 目录...");
+  console.log("按 Ctrl+C 退出监听");
+  console.log("=".repeat(60) + "\n");
+
+  // 使用 fs.watch 监听目录变化（递归监听）
+  const watcher = fs.watch(
+    sourceDir,
+    { recursive: true },
+    async (eventType, filename) => {
+      // 忽略临时文件和目录
+      if (
+        !filename ||
+        filename.includes("_extracted") ||
+        filename.startsWith(".")
+      ) {
+        return;
+      }
+
+      // 只处理文件新增事件（rename 通常表示文件创建）
+      if (eventType !== "rename") {
+        return;
+      }
+
+      // 防抖处理：等待 2 秒后再检查，避免文件还在复制中
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+
+      debounceTimer = setTimeout(async () => {
+        // 如果正在处理，跳过本次检查
+        if (isProcessing) {
+          console.log("正在处理中，跳过本次检查...");
+          return;
+        }
+
+        try {
+          // 检查是否有新的压缩文件
+          const compressedFiles = await findCompressedFiles(sourceDir);
+          const newFiles = compressedFiles.filter(
+            (file) => !processed.has(file)
+          );
+
+          if (newFiles.length > 0) {
+            isProcessing = true;
+            console.log(
+              `\n检测到 ${newFiles.length} 个新的压缩文件，开始处理...`
+            );
+
+            const result = await recursiveExtract(
+              sourceDir,
+              uploadDir,
+              processed
+            );
+
+            // 清理临时目录
+            await cleanTempDirectories(sourceDir);
+
+            console.log("\n处理完成，继续监听...\n");
+            isProcessing = false;
+          }
+        } catch (error) {
+          console.error(`监听处理错误: ${error.message}`);
+          isProcessing = false;
+        }
+      }, 2000); // 2 秒防抖
+    }
+  );
+
+  // 处理监听错误
+  watcher.on("error", (error) => {
+    console.error(`监听错误: ${error.message}`);
+  });
+
+  return watcher;
 }
 
 /**
@@ -1337,17 +1425,36 @@ async function main() {
   console.log(`输出目录: ${uploadDir} (${dateStr})`);
   console.log(`解压密码: ${PASSWORD}`);
 
-  // 开始递归解压
+  // 用于跟踪已处理的文件
+  const processed = new Set();
+
+  // 先执行一次初始解压
   try {
-    await recursiveExtract(sourceDir, uploadDir);
+    console.log("\n执行初始解压...");
+    await recursiveExtract(sourceDir, uploadDir, processed);
 
     // 解压完成后，只清理 source 目录中的临时解压目录（_extracted 目录）
     // 解压成功的文件已经删除，解压失败的文件保留以便重试
     await cleanTempDirectories(sourceDir);
   } catch (error) {
-    console.error("发生错误:", error.message);
-    process.exit(1);
+    console.error("初始解压发生错误:", error.message);
   }
+
+  // 开始监听目录变化
+  const watcher = watchSourceDirectory(sourceDir, uploadDir, processed);
+
+  // 处理退出信号
+  process.on("SIGINT", () => {
+    console.log("\n\n正在退出...");
+    watcher.close();
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", () => {
+    console.log("\n\n正在退出...");
+    watcher.close();
+    process.exit(0);
+  });
 }
 
 // 运行主函数
