@@ -1421,6 +1421,20 @@ async function main() {
     console.log(`创建输出目录: ${uploadDir}`);
   }
 
+  // 创建附文件夹（如：20251203_bd）
+  const bdDir = path.join(projectRoot, `${dateStr}_bd`);
+  if (!fs.existsSync(bdDir)) {
+    fs.mkdirSync(bdDir, { recursive: true });
+    console.log(`创建附文件夹: ${bdDir}`);
+  }
+
+  // 创建 quark 文件夹（如：20251203_quark）
+  const quarkDir = path.join(projectRoot, `${dateStr}_quark`);
+  if (!fs.existsSync(quarkDir)) {
+    fs.mkdirSync(quarkDir, { recursive: true });
+    console.log(`创建 quark 文件夹: ${quarkDir}`);
+  }
+
   console.log(`源目录: ${sourceDir}`);
   console.log(`输出目录: ${uploadDir} (${dateStr})`);
   console.log(`解压密码: ${PASSWORD}`);
