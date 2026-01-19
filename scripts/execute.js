@@ -1421,11 +1421,67 @@ async function main() {
     console.log(`创建输出目录: ${uploadDir}`);
   }
 
-  // 创建附文件夹（如：20251203_bd）
-  const bdDir = path.join(projectRoot, `${dateStr}_bd`);
+  // 创建附文件夹（如：20251203_bd_1），如果已存在则递增序号
+  // 序号需要持久化保存，以便当天多次运行时能够正确递增
+  function findNextBdDir(baseDateStr) {
+    const baseName = `${baseDateStr}_bd`;
+    const counterFile = path.join(projectRoot, `.bd_counter_${baseDateStr}.json`);
+    
+    let counter = 1;
+    
+    // 尝试从文件读取上次的序号
+    if (fs.existsSync(counterFile)) {
+      try {
+        const data = fs.readFileSync(counterFile, 'utf8');
+        const saved = JSON.parse(data);
+        if (saved.date === baseDateStr && saved.counter) {
+          counter = saved.counter + 1; // 递增序号
+        }
+      } catch (error) {
+        console.warn(`警告: 读取序号文件失败，将重新开始: ${error.message}`);
+      }
+    }
+    
+    // 检查文件系统中已存在的最大序号（防止文件丢失的情况）
+    let maxExistingCounter = 0;
+    try {
+      const entries = fs.readdirSync(projectRoot);
+      for (const entry of entries) {
+        const match = entry.match(new RegExp(`^${baseName}_(\\d+)$`));
+        if (match) {
+          const existingCounter = parseInt(match[1], 10);
+          if (existingCounter > maxExistingCounter) {
+            maxExistingCounter = existingCounter;
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`警告: 扫描目录失败: ${error.message}`);
+    }
+    
+    // 使用文件系统中的最大序号和保存的序号中的较大值
+    counter = Math.max(counter, maxExistingCounter + 1);
+    
+    // 保存序号到文件
+    try {
+      fs.writeFileSync(counterFile, JSON.stringify({
+        date: baseDateStr,
+        counter: counter
+      }, null, 2), 'utf8');
+    } catch (error) {
+      console.warn(`警告: 保存序号文件失败: ${error.message}`);
+    }
+    
+    const bdDir = path.join(projectRoot, `${baseName}_${counter}`);
+    return { dir: bdDir, counter };
+  }
+  
+  const { dir: bdDir, counter: bdCounter } = findNextBdDir(dateStr);
   if (!fs.existsSync(bdDir)) {
     fs.mkdirSync(bdDir, { recursive: true });
-    console.log(`创建附文件夹: ${bdDir}`);
+    console.log(`创建附文件夹: ${path.basename(bdDir)} (序号: ${bdCounter})`);
+  } else {
+    console.log(`附文件夹已存在: ${path.basename(bdDir)} (序号: ${bdCounter})`);
   }
 
   // 创建 quark 文件夹（如：20251203_quark）

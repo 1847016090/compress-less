@@ -248,9 +248,71 @@ async function compositeImages(imagePaths, outputPath) {
   return outputPath;
 }
 
+// 获取当前日期的 bd 文件夹（参考 execute.js 的生成规则）
+function getBdFolderPath(projectRoot) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const dateStr = `${year}${month}${day}`;
+  
+  const baseName = `${dateStr}_bd`;
+  let maxCounter = -1; // 使用 -1 表示没有序号
+  let maxBdDir = null;
+  let maxBdName = null;
+  
+  try {
+    const entries = fs.readdirSync(projectRoot);
+    for (const entry of entries) {
+      // 检查是否匹配带序号的格式：YYYYMMDD_bd_N
+      const matchWithCounter = entry.match(new RegExp(`^${baseName}_(\\d+)$`));
+      if (matchWithCounter) {
+        const counter = parseInt(matchWithCounter[1], 10);
+        if (counter > maxCounter) {
+          maxCounter = counter;
+          maxBdDir = path.join(projectRoot, entry);
+          maxBdName = entry;
+        }
+      }
+      // 检查是否匹配不带序号的格式：YYYYMMDD_bd
+      else if (entry === baseName) {
+        // 如果不带序号的文件夹存在，且还没有找到带序号的，则使用它
+        if (maxCounter === -1) {
+          maxCounter = 0; // 标记为找到，但不使用序号
+          maxBdDir = path.join(projectRoot, entry);
+          maxBdName = entry;
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`错误: 无法扫描目录: ${error.message}`);
+  }
+  
+  if (!maxBdDir) {
+    throw new Error(`未找到当天的 bd 文件夹: ${baseName} 或 ${baseName}_*`);
+  }
+  
+  return { dir: maxBdDir, name: maxBdName, dateStr };
+}
+
 // 主函数
 async function main() {
-  const sourceDir = path.join(__dirname, "..", "publish-source");
+  const projectRoot = path.join(__dirname, "..");
+  
+  // 获取当天的 bd 文件夹
+  let bdFolderInfo;
+  try {
+    bdFolderInfo = getBdFolderPath(projectRoot);
+  } catch (error) {
+    console.error(`错误: ${error.message}`);
+    process.exit(1);
+  }
+  
+  const sourceDir = bdFolderInfo.dir;
+  const bdFolderName = bdFolderInfo.name;
+  
+  console.log(`使用文件夹: ${bdFolderName}`);
+  console.log(`路径: ${sourceDir}`);
   
   // 检查源目录是否存在
   if (!fs.existsSync(sourceDir)) {
@@ -265,7 +327,7 @@ async function main() {
     .map(entry => entry.name);
   
   if (folders.length === 0) {
-    console.error("错误: 在 publish-source 目录下没有找到文件夹");
+    console.error("错误: 在 bd 文件夹下没有找到文件夹");
     process.exit(1);
   }
   
@@ -329,9 +391,11 @@ async function main() {
   console.log(`\n总共找到 ${allImages.length} 张图片`);
   console.log(`随机选择了 ${selectedImages.length} 张图片用于合成`);
   
-  // 构建描述文本（模版 + 提取的内容，隔行显示）
+  // 构建描述文本
+  // 格式：模版文本（上方） + 空行 + bd文件夹名（中间） + 空行 + 其他文件夹名字（底部，隔行显示）
   const descLines = noContents.map(content => content);
-  const description = TEMPLATE + descLines.join("\n\n");
+  // 模版在上方，bd文件夹名在中间，其他文件夹名字在底部
+  const description = TEMPLATE.trim() + "\n\n" + bdFolderName + "\n\n" + descLines.join("\n\n");
   
   console.log("\n生成的描述文本:");
   console.log("-".repeat(50));
