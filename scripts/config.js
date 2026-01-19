@@ -1,0 +1,8 @@
+module.exports = {
+  COOKIE: "cookie2=11c7f4ec3c080c9903d7d2174e0253c9; _samesite_flag_=true; t=f8edbd0dc2575b010aea7427dc1ab782; _tb_token_=e565be13e7e8e; xlly_s=1; sdkSilent=1768874647716; cna=25r0IR6woyEBASQOA5yQTBOF; mtop_partitioned_detect=1; _m_h5_tk=add12ed7831caa010c1d0331f1d3801b_1768813640385; _m_h5_tk_enc=58029e6f389be9ed4b0f24a8cd5ade13; sgcookie=E100jh0x1ZJmtB%2BIJl5y7V%2B894gdEIymM7oEjrDKQ9QpXurKtXLkmP5E5SUNxkoX%2BYJ40FBl4D%2FsiwREDKA%2B9oYrGLexQb73A1o4b4F%2FG0P32gKLLGh7NYPbzgmzmqBGTpOv; tracknick=xy815185703835; csg=bb1554e0; unb=2220473361037; tfstk=gU3-drtMAIC88-8XBaxDKNqnGQAmyncPZYl1-J2lAxHx1fWuA44opMHoTvqBUz0KHzumqw2kUyhIIypMIFYiabzTRdvGYMchMzPLO_aCKr_b6yF5PBn1PbzURKfcRhYtaYDA3TqQRIUb95IQRwaQcIF3T9aQFk6fc5wbdyMQVisb1W2QNJNCGIFUhJaQRvaXMW2bdyaIdjG8gneFVRbKq3wSBddS_w_Ik7EXjbwf0JgbwPetN4QCRCN82RG73LKKsJrKeu3DyOP-cfh0wv8NzzZKA44jPKTQlfomFSHBBMejX4uLj4pOb8gzLxEi2dQ-BYPI9WMJ71ejyX3Y4mfGWjEtl44rDdQgCmlIJoGyBGPmAf0ovYvVR8mtGxEiotbg5ckxJla14CuiWbGfIRFhVIdAYMr7gx4WMsXPeFZ8MRA0ZMSUDnPYIIp1YMrSGSeMiGIFYoHh.",
+  // 文件夹名黑名单：如果提取的内容包含这些字符串，将被过滤掉
+  FOLDER_NAME_BLACKLIST: [
+    "[IESS异思趣向]",
+    // 可以在这里添加更多需要过滤的内容
+  ],
+};
