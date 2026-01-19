@@ -3,6 +3,8 @@ module.exports = {
   // 文件夹名黑名单：如果提取的内容包含这些字符串，将被过滤掉
   FOLDER_NAME_BLACKLIST: [
     "[IESS异思趣向]",
+    "IESS异思趣向",
+    "SSA丝社 评测",
     // 可以在这里添加更多需要过滤的内容
   ],
 };
